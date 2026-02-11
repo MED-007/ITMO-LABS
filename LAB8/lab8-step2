@@ -1,0 +1,141 @@
+import cv2
+import numpy as np
+
+def verify_marker(roi):
+    """
+    Checks if a detected circle ROI looks like the marker.
+    Criteria:
+    1. High Contrast (Standard Deviation) - The marker is black & white, so variance is high.
+    2. 50/50 Balance - The marker is roughly 50% white and 50% black.
+    """
+    if roi.size == 0:
+        return False
+        
+    # 1. Check Contrast: Calculate Standard Deviation
+    mean, std_dev = cv2.meanStdDev(roi)
+    
+    # If the circle is a flat color (like a wall or forehead), std_dev is low (< 30).
+    # The marker (Black/White) usually has std_dev > 50.
+    if std_dev[0][0] < 45: 
+        return False
+
+    # 2. Check Black/White Ratio
+    # Use simple thresholding to separate bright/dark pixels
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY) if len(roi.shape) == 3 else roi
+    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    
+    white_pixels = cv2.countNonZero(thresh)
+    total_pixels = thresh.size
+    ratio = white_pixels / total_pixels
+
+    # The marker is 4 quadrants (2 white, 2 black), so ratio should be ~0.5
+    # We allow a range of 30% to 70% to account for lighting/borders
+    if 0.30 < ratio < 0.70:
+        return True
+        
+    return False
+
+def main():
+    cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+    if not cap.isOpened():
+        raise RuntimeError("Cannot open camera.")
+
+    # Higher resolution helps with circle detection
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+
+    # Variant 10: Center Square Zone
+    zone_size = 150
+    flip_active = False
+    was_inside = False
+
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
+
+        # Define Center Zone
+        h, w = frame.shape[:2]
+        x1 = (w - zone_size) // 2
+        y1 = (h - zone_size) // 2
+        x2 = x1 + zone_size
+        y2 = y1 + zone_size
+
+        # Pre-process
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        # Blur reduces noise/false circles
+        gray = cv2.GaussianBlur(gray, (9, 9), 2)
+
+        # Detect Circles
+        circles = cv2.HoughCircles(
+            gray,
+            cv2.HOUGH_GRADIENT,
+            dp=1.2,          # Resolution ratio
+            minDist=100,     # Min distance between circles (prevent duplicates)
+            param1=100,      # Canny edge threshold (High = less edges)
+            param2=35,       # Accumulator threshold (High = stricter circle check)
+            minRadius=20,    # Min size of marker
+            maxRadius=150    # Max size of marker
+        )
+
+        detected_marker = None
+
+        if circles is not None:
+            circles = np.uint16(np.around(circles))
+            
+            # Loop through all detected circles
+            for i in circles[0, :]:
+                cx, cy, r = i[0], i[1], i[2]
+                
+                # Extract the Region of Interest (ROI) around the circle
+                # Ensure we don't go out of bounds
+                y_min, y_max = max(0, cy-r), min(h, cy+r)
+                x_min, x_max = max(0, cx-r), min(w, cx+r)
+                roi = frame[y_min:y_max, x_min:x_max]
+
+                # VALIDATION STEP
+                if verify_marker(roi):
+                    # Found it!
+                    detected_marker = (cx, cy)
+                    
+                    # Draw green circle on the Valid Marker
+                    cv2.circle(frame, (cx, cy), r, (0, 255, 0), 2)
+                    cv2.circle(frame, (cx, cy), 5, (0, 0, 255), 3)
+                    
+                    # Stop looking after finding the first valid marker
+                    break 
+
+        # Draw Target Zone
+        color = (0, 255, 0) if flip_active else (255, 0, 0)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+        cv2.putText(frame, "Target Zone", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+        # Check interaction
+        if detected_marker:
+            mx, my = detected_marker
+            is_inside = (x1 < mx < x2) and (y1 < my < y2)
+            
+            # Toggle Flip Logic (only on entry)
+            if is_inside and not was_inside:
+                flip_active = not flip_active
+            was_inside = is_inside
+            
+            cv2.putText(frame, f"Marker: {mx},{my}", (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
+        else:
+            was_inside = False # Reset if marker is lost
+
+        # Apply Flip
+        if flip_active:
+            frame = cv2.flip(frame, -1)
+            cv2.putText(frame, "FLIPPED", (20, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
+
+        cv2.imshow("Variant 10 - Robust Tracking", frame)
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    main()

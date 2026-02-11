@@ -1,0 +1,139 @@
+import cv2
+import numpy as np
+
+def verify_marker(roi):
+    """Verifies if the detected circle is the high-contrast marker."""
+    if roi.size == 0: return False
+    mean, std_dev = cv2.meanStdDev(roi)
+    if std_dev[0][0] < 45: return False # Ignore low contrast (walls, skin)
+    
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY) if len(roi.shape) == 3 else roi
+    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    ratio = cv2.countNonZero(thresh) / thresh.size
+    return 0.30 < ratio < 0.70
+
+def overlay_image_alpha(img, img_overlay, pos, alpha_mask):
+    """Overlays img_overlay on top of img at position pos using alpha_mask."""
+    x, y = pos
+    
+    # Image ranges
+    h, w = img_overlay.shape[:2]
+    
+    # Calculate bounds to ensure we don't draw outside the main frame
+    y1, y2 = max(0, y - h // 2), min(img.shape[0], y + h // 2)
+    x1, x2 = max(0, x - w // 2), min(img.shape[1], x + w // 2)
+    
+    # Calculate overlay ranges (in case it's clipped at the edge)
+    dy1 = y1 - (y - h // 2)
+    dy2 = h - ((y + h // 2) - y2)
+    dx1 = x1 - (x - w // 2)
+    dx2 = w - ((x + w // 2) - x2)
+
+    if y1 >= y2 or x1 >= x2: return img
+
+    # Region of Interest (ROI) on the main frame
+    roi = img[y1:y2, x1:x2]
+    
+    # The part of the fly image we will use
+    overlay_crop = img_overlay[dy1:dy2, dx1:dx2]
+    mask_crop = alpha_mask[dy1:dy2, dx1:dx2]
+
+    # Invert mask for the background
+    mask_inv = cv2.bitwise_not(mask_crop)
+
+    # Black-out the area of the fly in ROI
+    img_bg = cv2.bitwise_and(roi, roi, mask=mask_inv)
+    
+    # Take only the region of the fly from overlay image
+    img_fg = cv2.bitwise_and(overlay_crop, overlay_crop, mask=mask_crop)
+
+    # Put the fly in the ROI and modify the main image
+    dst = cv2.add(img_bg, img_fg)
+    img[y1:y2, x1:x2] = dst
+    return img
+
+def main():
+    # Load Fly Image
+    fly_path = 'fly64.png'
+    fly_img = cv2.imread(fly_path)
+    if fly_img is None:
+        raise RuntimeError(f"Could not load {fly_path}")
+    
+    # Create a mask to remove white background from the fly
+    # (Assuming the background is white [255,255,255])
+    fly_gray = cv2.cvtColor(fly_img, cv2.COLOR_BGR2GRAY)
+    # Create mask: Pixels NOT white are the fly (mask=255), white background is 0
+    _, fly_mask = cv2.threshold(fly_gray, 240, 255, cv2.THRESH_BINARY_INV)
+
+    cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+
+    zone_size = 150
+    flip_active = False
+    was_inside = False
+
+    while True:
+        ok, frame = cap.read()
+        if not ok: break
+
+        # Detection Logic 
+        h, w = frame.shape[:2]
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (9, 9), 2)
+
+        circles = cv2.HoughCircles(
+            gray, cv2.HOUGH_GRADIENT, dp=1.2, minDist=100,
+            param1=100, param2=35, minRadius=20, maxRadius=150
+        )
+
+        detected_marker = None
+        if circles is not None:
+            circles = np.uint16(np.around(circles))
+            for i in circles[0, :]:
+                cx, cy, r = i[0], i[1], i[2]
+                y_min, y_max = max(0, cy-r), min(h, cy+r)
+                x_min, x_max = max(0, cx-r), min(w, cx+r)
+                roi = frame[y_min:y_max, x_min:x_max]
+
+                if verify_marker(roi):
+                    detected_marker = (cx, cy)
+                    break 
+
+        #  Draw Target Zone
+        x1, y1 = (w - zone_size) // 2, (h - zone_size) // 2
+        x2, y2 = x1 + zone_size, y1 + zone_size
+        color = (0, 255, 0) if flip_active else (255, 0, 0)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+
+        # Logic & Overlay
+        if detected_marker:
+            mx, my = detected_marker
+            is_inside = (x1 < mx < x2) and (y1 < my < y2)
+            
+            if is_inside and not was_inside:
+                flip_active = not flip_active
+            was_inside = is_inside
+            
+            # OVERLAY THE FLY
+            # i resize the fly slightly if needed, or use original size
+            # Let's keep original size (64px) or scale with radius 'r' if desired.
+            # Here i just use the fixed image.
+            frame = overlay_image_alpha(frame, fly_img, (mx, my), fly_mask)
+
+        else:
+            was_inside = False
+
+        if flip_active:
+            frame = cv2.flip(frame, -1)
+            cv2.putText(frame, "FLIPPED", (20, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
+
+        cv2.imshow("Variant 10 + Fly", frame)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    main()
